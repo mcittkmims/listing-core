@@ -1,56 +1,42 @@
 # Apartment Lens · Core service
 
-The backend of [Apartment Lens](https://github.com/mcittkmims/apartment-lens): one Java app with strict internal modules. Its REST API is the only way into the system from outside; the [frontend](https://github.com/mcittkmims/listing-frontend) is its client.
+The core service is the backend of [Apartment Lens](https://github.com/mcittkmims/apartment-lens). It is a Java application built as a modular monolith, and its REST API is the only way into the system from outside. The [frontend](https://github.com/mcittkmims/listing-frontend) is its only client.
 
 > **Status:** design stage. This README describes the plan; there is no code yet.
 
-## What it does
+## Responsibilities
 
-- Serves the REST API the frontend uses: map search, filters, property pages with every source's ad and the price history.
-- Decides which ads are the same flat.
-- Accepts photo and video searches and returns the results.
-- Holds the review queue for unclear matches.
-- Later: user accounts, saved searches and price-drop alerts.
+The core service answers every request from the frontend: map searches with filters, property pages with the ads from every source and their price history, and photo and video searches. It is also the only component that decides whether two ads describe the same property, and it keeps a review queue for the pairs it cannot decide on automatically. User accounts, saved searches and price-drop alerts will be added later.
 
 ## Modules
 
-Each module is its own package. Spring Modulith tests fail if one module reaches into another's internals.
+The application is split into modules, each in its own package. Spring Modulith verifies in a test that no module reaches into the internals of another, which keeps the monolith easy to change and makes it possible to move a module into its own service later.
 
-| Module | Job |
+| Module | Responsibility |
 |---|---|
-| `catalog` | Buildings, flats, price history |
-| `matching` | Same-flat decisions |
+| `catalog` | Buildings, properties and price history |
+| `matching` | Deciding which ads describe the same property |
 | `search` | Map and filter queries |
-| `lens` | Accepts photo/video searches, queues them, returns results |
-| `review` | Unclear pairs waiting for a manual decision |
-| `users`, `alerts` | Accounts, saved searches, notifications (later) |
+| `lens` | Accepting photo and video searches and returning their results |
+| `review` | Pairs of ads waiting for a manual decision |
+| `users`, `alerts` | Accounts, saved searches and notifications (later) |
 
-## How matching works
+## Matching
 
-- **Runs twice per new ad:** right away, using identical or near-identical photos plus facts, and again after the daily batch vision worker adds vectors and same-room check scores.
-- **Candidates come from Postgres queries:** ads within ~300 m (PostGIS), same room count, area within 5%, or the same phone hash. Address and description similarity come from pg_trgm.
-- **Rules decide:** same flat, same building, review, or different. Facts overrule photos: two known, different floors are two different flats.
-- **Every decision is reversible:** links have `valid_from`/`valid_to`, and the evidence is stored with a model version.
+Matching runs twice for every new ad. The first pass runs as soon as the ad's photos are fingerprinted and relies on identical or near-identical photos together with the ad's facts. The second pass runs after the daily batch, when image vectors and same-room checks are available for the new photos.
 
-## How a photo or video search works
+Candidate ads come from PostgreSQL queries rather than from code that loops over all ads. PostGIS finds ads within about 300 metres with the same room count and an area within 5%, and ads that share a phone hash are added as candidates. pg_trgm scores how similar two addresses or descriptions are. The matching rules combine these facts with the photo evidence from the vision workers and produce one of four decisions: same property, same building, review, or different.
 
-1. The upload is saved and a `lens_photo` or `lens_video` job goes into `ops.job`.
-2. The online vision worker picks it up and writes the ranked results.
-3. The API returns the top flats, each with its matching photos or frames as proof.
+Hard facts override photo evidence. Two ads with different known floors describe different properties even if every photo matches, because developers reuse the same renders for all units in a building. Every decision is stored with its evidence and the version of the rules that made it, and links between ads and properties are closed rather than deleted, so a wrong decision can always be reversed.
 
-Searches are rate-limited, because each one costs CPU time on the server.
+## Photo and video search
 
-## Database
+When the frontend uploads a photo or video, the core service stores the file, creates a search record and adds a job to the queue. The online vision worker processes the job and writes the ranked results back. The frontend polls the search until the results are ready, and the core service returns the matching properties together with the photos or video frames that matched. Searches are rate-limited, because each one uses CPU time on the server.
 
-- **Reads:** `ingest`, `media`, `social`.
-- **Writes:** `catalog`, `app`, `ops`.
+## Data access
 
-See [database](https://github.com/mcittkmims/apartment-lens/tree/main/database).
+The core service reads the `ingest`, `media` and `social` schemas and writes to `catalog`, `app` and `ops`. The schemas are described in the [main repository](https://github.com/mcittkmims/apartment-lens#database).
 
-## Runs on
+## Technology
 
-The server, behind the reverse proxy.
-
-## Tech
-
-Java 21 or 25, Spring Boot, Spring Modulith, jOOQ, Bucket4j (rate limits).
+The service uses Java 21 or later with Spring Boot and Spring Modulith, jOOQ for SQL-heavy queries such as PostGIS and pgvector lookups, and Bucket4j for rate limiting. It runs on the server behind the reverse proxy.
